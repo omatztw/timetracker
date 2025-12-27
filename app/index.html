@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TimeTracker</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1>TimeTracker</h1>
+        <div class="controls">
+          <input type="date" id="date-picker" />
+          <button id="toggle-tracking" class="btn btn-primary">
+            Tracking: ON
+          </button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section class="timeline-section">
+          <h2>Timeline</h2>
+          <div id="timeline" class="timeline"></div>
+        </section>
+
+        <section class="summary-section">
+          <h2>App Usage Summary</h2>
+          <div id="summary" class="summary"></div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div id="status" class="status">Ready</div>
+      </footer>
+    </div>
+  </body>
+</html>
