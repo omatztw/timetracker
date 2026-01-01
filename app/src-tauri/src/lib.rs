@@ -18,8 +18,111 @@ mod windows_watcher {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
     use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationCondition,
+        UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_NamePropertyId,
+        UIA_ValueValuePropertyId, TreeScope_Subtree,
+    };
+    use windows::Win32::System::Com::{CoInitializeEx, CoCreateInstance, CLSCTX_ALL, COINIT_MULTITHREADED};
+    use url::Url;
 
-    pub fn get_active_window_info() -> Option<(String, String)> {
+    // Browser process names
+    const BROWSER_PROCESSES: &[&str] = &[
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "vivaldi.exe",
+        "iexplore.exe",
+    ];
+
+    pub fn is_browser(process_name: &str) -> bool {
+        let lower = process_name.to_lowercase();
+        BROWSER_PROCESSES.iter().any(|b| lower == *b)
+    }
+
+    pub fn extract_domain(url_str: &str) -> Option<String> {
+        if let Ok(url) = Url::parse(url_str) {
+            url.host_str().map(|h| h.to_string())
+        } else {
+            None
+        }
+    }
+
+    pub fn get_browser_url(hwnd: HWND) -> Option<String> {
+        unsafe {
+            // Initialize COM
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+            // Create UI Automation instance
+            let automation: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL) {
+                Ok(a) => a,
+                Err(_) => return None,
+            };
+
+            // Get element from window handle
+            let element: IUIAutomationElement = match automation.ElementFromHandle(hwnd) {
+                Ok(e) => e,
+                Err(_) => return None,
+            };
+
+            // Create condition to find Edit controls (address bar)
+            let edit_condition: IUIAutomationCondition = match automation.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &windows::core::VARIANT::from(UIA_EditControlTypeId.0),
+            ) {
+                Ok(c) => c,
+                Err(_) => return None,
+            };
+
+            // Find all Edit elements
+            let elements = match element.FindAll(TreeScope_Subtree, &edit_condition) {
+                Ok(e) => e,
+                Err(_) => return None,
+            };
+
+            let count = elements.Length().unwrap_or(0);
+
+            for i in 0..count {
+                if let Ok(elem) = elements.GetElement(i) {
+                    // Check if this is the address bar by looking at the name property
+                    if let Ok(name) = elem.GetCurrentPropertyValue(UIA_NamePropertyId) {
+                        let name_str = name.to_string().to_lowercase();
+                        // Common address bar identifiers
+                        if name_str.contains("address") ||
+                           name_str.contains("url") ||
+                           name_str.contains("アドレス") ||
+                           name_str.contains("location") {
+                            // Get the value (URL)
+                            if let Ok(value) = elem.GetCurrentPropertyValue(UIA_ValueValuePropertyId) {
+                                let url_str = value.to_string();
+                                if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                                    return Some(url_str);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback: try to find any edit control with a URL-like value
+            for i in 0..count {
+                if let Ok(elem) = elements.GetElement(i) {
+                    if let Ok(value) = elem.GetCurrentPropertyValue(UIA_ValueValuePropertyId) {
+                        let url_str = value.to_string();
+                        if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                            return Some(url_str);
+                        }
+                    }
+                }
+            }
+
+            None
+        }
+    }
+
+    pub fn get_active_window_info() -> Option<(String, String, Option<String>)> {
         unsafe {
             let hwnd: HWND = GetForegroundWindow();
             if hwnd.0.is_null() {
@@ -55,16 +158,46 @@ mod windows_watcher {
                 String::from("Unknown")
             };
 
-            Some((process_name, title))
+            // Get domain if it's a browser
+            let domain = if is_browser(&process_name) {
+                get_browser_url(hwnd).and_then(|url| extract_domain(&url))
+            } else {
+                None
+            };
+
+            Some((process_name, title, domain))
         }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod windows_watcher {
-    pub fn get_active_window_info() -> Option<(String, String)> {
+    pub fn get_active_window_info() -> Option<(String, String, Option<String>)> {
         // Stub for non-Windows platforms (development only)
-        Some((String::from("DemoApp.exe"), String::from("Demo Window - Development Mode")))
+        // Simulate browser with domain for testing
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Alternate between browser and non-browser for demo
+        if count % 3 == 0 {
+            Some((
+                String::from("chrome.exe"),
+                String::from("GitHub - Demo Page"),
+                Some(String::from("github.com")),
+            ))
+        } else if count % 3 == 1 {
+            Some((
+                String::from("chrome.exe"),
+                String::from("Google Search"),
+                Some(String::from("google.com")),
+            ))
+        } else {
+            Some((
+                String::from("Code.exe"),
+                String::from("lib.rs - timetracker"),
+                None,
+            ))
+        }
     }
 }
 
@@ -75,6 +208,7 @@ pub struct ActivityRecord {
     pub id: i64,
     pub process_name: String,
     pub window_title: String,
+    pub domain: Option<String>,
     pub start_time: String,
     pub end_time: String,
     pub duration_seconds: i64,
@@ -83,6 +217,13 @@ pub struct ActivityRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSummary {
     pub process_name: String,
+    pub total_seconds: i64,
+    pub percentage: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainSummary {
+    pub domain: String,
     pub total_seconds: i64,
     pub percentage: f64,
 }
@@ -108,6 +249,7 @@ impl AppState {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 process_name TEXT NOT NULL,
                 window_title TEXT NOT NULL,
+                domain TEXT,
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL,
                 duration_seconds INTEGER NOT NULL
@@ -115,8 +257,16 @@ impl AppState {
             [],
         )?;
 
+        // Add domain column if it doesn't exist (migration for existing databases)
+        let _ = conn.execute("ALTER TABLE activities ADD COLUMN domain TEXT", []);
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_start_time ON activities(start_time)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_domain ON activities(domain)",
             [],
         )?;
 
@@ -154,7 +304,7 @@ fn get_activities(state: State<Arc<AppState>>, date: String) -> Result<Vec<Activ
 
     let mut stmt = db
         .prepare(
-            "SELECT id, process_name, window_title, start_time, end_time, duration_seconds
+            "SELECT id, process_name, window_title, domain, start_time, end_time, duration_seconds
              FROM activities
              WHERE start_time >= ?1 AND start_time <= ?2
              ORDER BY start_time ASC",
@@ -167,9 +317,10 @@ fn get_activities(state: State<Arc<AppState>>, date: String) -> Result<Vec<Activ
                 id: row.get(0)?,
                 process_name: row.get(1)?,
                 window_title: row.get(2)?,
-                start_time: row.get(3)?,
-                end_time: row.get(4)?,
-                duration_seconds: row.get(5)?,
+                domain: row.get(3)?,
+                start_time: row.get(4)?,
+                end_time: row.get(5)?,
+                duration_seconds: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -221,10 +372,53 @@ fn get_app_summary(state: State<Arc<AppState>>, date: String) -> Result<Vec<AppS
     Ok(result)
 }
 
+#[tauri::command]
+fn get_domain_summary(state: State<Arc<AppState>>, date: String) -> Result<Vec<DomainSummary>, String> {
+    let db = state.db.lock();
+    let start_of_day = format!("{}T00:00:00", date);
+    let end_of_day = format!("{}T23:59:59", date);
+
+    let mut stmt = db
+        .prepare(
+            "SELECT domain, SUM(duration_seconds) as total
+             FROM activities
+             WHERE start_time >= ?1 AND start_time <= ?2 AND domain IS NOT NULL AND domain != ''
+             GROUP BY domain
+             ORDER BY total DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let summaries: Vec<(String, i64)> = stmt
+        .query_map(params![start_of_day, end_of_day], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total_seconds: i64 = summaries.iter().map(|(_, s)| s).sum();
+
+    let result = summaries
+        .into_iter()
+        .map(|(domain, secs)| DomainSummary {
+            domain,
+            total_seconds: secs,
+            percentage: if total_seconds > 0 {
+                (secs as f64 / total_seconds as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect();
+
+    Ok(result)
+}
+
 fn start_watcher_thread(state: Arc<AppState>) {
     thread::spawn(move || {
         let mut last_process = String::new();
         let mut last_title = String::new();
+        let mut last_domain: Option<String> = None;
         let mut activity_start: Option<DateTime<Local>> = None;
 
         loop {
@@ -233,25 +427,27 @@ fn start_watcher_thread(state: Arc<AppState>) {
             if !*state.is_tracking.lock() {
                 // Save current activity before pausing
                 if let Some(start) = activity_start.take() {
-                    save_activity(&state, &last_process, &last_title, start);
+                    save_activity(&state, &last_process, &last_title, last_domain.as_deref(), start);
                 }
                 last_process.clear();
                 last_title.clear();
+                last_domain = None;
                 continue;
             }
 
-            if let Some((process_name, window_title)) = get_active_window_info() {
-                let changed = process_name != last_process || window_title != last_title;
+            if let Some((process_name, window_title, domain)) = get_active_window_info() {
+                let changed = process_name != last_process || window_title != last_title || domain != last_domain;
 
                 if changed {
                     // Save previous activity
                     if let Some(start) = activity_start.take() {
-                        save_activity(&state, &last_process, &last_title, start);
+                        save_activity(&state, &last_process, &last_title, last_domain.as_deref(), start);
                     }
 
                     // Start new activity
                     last_process = process_name;
                     last_title = window_title;
+                    last_domain = domain;
                     activity_start = Some(Local::now());
                 }
             }
@@ -259,7 +455,7 @@ fn start_watcher_thread(state: Arc<AppState>) {
     });
 }
 
-fn save_activity(state: &Arc<AppState>, process_name: &str, window_title: &str, start: DateTime<Local>) {
+fn save_activity(state: &Arc<AppState>, process_name: &str, window_title: &str, domain: Option<&str>, start: DateTime<Local>) {
     if process_name.is_empty() {
         return;
     }
@@ -273,11 +469,12 @@ fn save_activity(state: &Arc<AppState>, process_name: &str, window_title: &str, 
 
     let db = state.db.lock();
     let _ = db.execute(
-        "INSERT INTO activities (process_name, window_title, start_time, end_time, duration_seconds)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO activities (process_name, window_title, domain, start_time, end_time, duration_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             process_name,
             window_title,
+            domain,
             start.format("%Y-%m-%dT%H:%M:%S").to_string(),
             end.format("%Y-%m-%dT%H:%M:%S").to_string(),
             duration,
@@ -349,6 +546,7 @@ pub fn run() {
             is_tracking,
             get_activities,
             get_app_summary,
+            get_domain_summary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

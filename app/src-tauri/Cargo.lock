@@ -3943,6 +3943,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "url",
  "windows 0.58.0",
 ]
 

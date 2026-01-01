@@ -100,10 +100,15 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .main {
   display: grid;
   grid-template-columns: 1fr 400px;
-  gap: 2rem;
+  grid-template-rows: 1fr 1fr;
+  gap: 1.5rem;
   padding: 2rem;
   flex: 1;
   overflow: hidden;
+}
+
+.timeline-section {
+  grid-row: 1 / -1;
 }
 
 section {
@@ -124,10 +129,6 @@ section h2 {
 }
 
 /* Timeline */
-.timeline-section {
-  overflow: hidden;
-}
-
 .timeline {
   overflow-y: auto;
   flex: 1;
@@ -273,10 +274,20 @@ section h2 {
 @media (max-width: 900px) {
   .main {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .timeline-section {
+    grid-row: auto;
+    max-height: 400px;
   }
 
   .summary-section {
-    max-height: 300px;
+    max-height: 250px;
+  }
+
+  .domain-section {
+    max-height: 250px;
   }
 }
 
