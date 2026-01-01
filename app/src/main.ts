@@ -4,6 +4,7 @@ interface ActivityRecord {
   id: number;
   process_name: string;
   window_title: string;
+  domain: string | null;
   start_time: string;
   end_time: string;
   duration_seconds: number;
@@ -11,6 +12,12 @@ interface ActivityRecord {
 
 interface AppSummary {
   process_name: string;
+  total_seconds: number;
+  percentage: number;
+}
+
+interface DomainSummary {
+  domain: string;
   total_seconds: number;
   percentage: number;
 }
@@ -63,14 +70,16 @@ function getToday(): string {
 async function loadActivities(date: string): Promise<void> {
   const timelineEl = document.getElementById("timeline")!;
   const summaryEl = document.getElementById("summary")!;
+  const domainSummaryEl = document.getElementById("domain-summary")!;
   const statusEl = document.getElementById("status")!;
 
   try {
     statusEl.textContent = "Loading...";
 
-    const [activities, summary] = await Promise.all([
+    const [activities, summary, domainSummary] = await Promise.all([
       invoke<ActivityRecord[]>("get_activities", { date }),
       invoke<AppSummary[]>("get_app_summary", { date }),
+      invoke<DomainSummary[]>("get_domain_summary", { date }),
     ]);
 
     // Render timeline
@@ -110,6 +119,28 @@ async function loadActivities(date: string): Promise<void> {
                 <span class="summary-app">${escapeHtml(app.process_name)}</span>
                 <span class="summary-stats">
                   ${formatDuration(app.total_seconds)} (${app.percentage.toFixed(1)}%)
+                </span>
+              </div>
+            </div>
+          `;
+        })
+        .join("");
+    }
+
+    // Render domain summary
+    if (domainSummary.length === 0) {
+      domainSummaryEl.innerHTML = '<div class="empty-state">No browser activity</div>';
+    } else {
+      domainSummaryEl.innerHTML = domainSummary
+        .map((item) => {
+          const color = getAppColor(item.domain);
+          return `
+            <div class="summary-item">
+              <div class="summary-bar" style="width: ${item.percentage}%; background-color: ${color}"></div>
+              <div class="summary-info">
+                <span class="summary-app">${escapeHtml(item.domain)}</span>
+                <span class="summary-stats">
+                  ${formatDuration(item.total_seconds)} (${item.percentage.toFixed(1)}%)
                 </span>
               </div>
             </div>
