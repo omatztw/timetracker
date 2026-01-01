@@ -17,8 +17,37 @@
           <button id="toggle-tracking" class="btn btn-primary">
             Tracking: ON
           </button>
+          <button id="integrations-btn" class="btn btn-secondary" title="External Integrations">
+            Integrations
+          </button>
         </div>
       </header>
+
+      <!-- Integrations Modal -->
+      <div id="integrations-modal" class="modal hidden">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h3>External Integrations</h3>
+            <button class="modal-close" id="close-modal">&times;</button>
+          </div>
+          <div class="modal-body">
+            <div class="config-section">
+              <h4>Configuration</h4>
+              <p class="config-path">Config file: <code id="config-path">-</code></p>
+              <div class="config-actions">
+                <button id="create-sample-config" class="btn btn-small">Create Sample Config</button>
+                <button id="reload-plugins" class="btn btn-small">Reload Plugins</button>
+              </div>
+            </div>
+            <div class="plugins-section">
+              <h4>Active Plugins</h4>
+              <div id="plugins-list" class="plugins-list">
+                <p class="empty-state-small">No plugins configured</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <main class="main">
         <section class="timeline-section">
