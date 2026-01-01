@@ -27,7 +27,14 @@ timetracker/
 │   ├── src-tauri/                # Rust backend
 │   │   ├── src/
 │   │   │   ├── main.rs           # Application entry point
-│   │   │   └── lib.rs            # Core logic (window watcher, DB, commands)
+│   │   │   ├── lib.rs            # Core logic (window watcher, DB, commands)
+│   │   │   └── plugins/          # External integration plugin system
+│   │   │       ├── mod.rs        # Plugin manager
+│   │   │       ├── traits.rs     # ExternalIntegration trait
+│   │   │       ├── config.rs     # TOML config loading
+│   │   │       └── integrations/ # Plugin implementations
+│   │   │           ├── mod.rs
+│   │   │           └── redmine.rs
 │   │   ├── capabilities/         # Tauri capability definitions
 │   │   ├── Cargo.toml            # Rust dependencies
 │   │   └── tauri.conf.json       # Tauri configuration
@@ -72,7 +79,8 @@ npm run build
 - **Browser URL Extraction**: Uses Windows UI Automation API to read browser address bars and extract domains
 - **Database**: SQLite storage in `%LOCALAPPDATA%/timetracker/activities.db`
 - **System Tray**: Minimizes to tray, click to restore, context menu for Show/Quit
-- **Tauri Commands**: `start_tracking`, `stop_tracking`, `is_tracking`, `get_activities`, `get_app_summary`, `get_domain_summary`
+- **Tauri Commands**: `start_tracking`, `stop_tracking`, `is_tracking`, `get_activities`, `get_app_summary`, `get_domain_summary`, `get_plugins`, `reload_plugins`, `create_sample_plugin_config`, `get_plugin_config_path`, `extract_ticket_ids`, `sync_time_entry`, `test_plugin_connection`
+- **Plugin System**: Extensible integration framework for syncing time entries to external services (Redmine, etc.)
 
 ### Browser Domain Aggregation
 
@@ -83,6 +91,51 @@ The application detects browser processes and extracts the current URL from the 
 - **Domain Parsing**: Extracts domain from URLs using the `url` crate
 - **Aggregation**: Tracks time spent per domain separately from app usage
 
+### External Integrations (Plugin System)
+
+The application supports external service integrations via a plugin system:
+
+- **Configuration File**: `%LOCALAPPDATA%/timetracker/integrations.toml`
+- **Plugin Architecture**: Trait-based design (`ExternalIntegration` trait)
+- **Ticket Detection**: Regex-based extraction of ticket IDs from window titles
+- **Supported Services**: Redmine (more can be added)
+
+#### Configuration Example
+
+```toml
+[[integrations]]
+name = "my-redmine"
+enabled = true
+type = "redmine"
+
+[integrations.config]
+url = "https://redmine.example.com"
+api_key = "your-api-key-here"
+default_activity_id = 9
+
+[[integrations.config.rules]]
+pattern = "#(\\d+)"
+source = "window_title"
+
+[[integrations.config.rules]]
+pattern = "Issue (\\d+)"
+source = "window_title"
+```
+
+#### Plugin Trait
+
+```rust
+#[async_trait]
+pub trait ExternalIntegration: Send + Sync {
+    fn name(&self) -> &str;
+    fn display_name(&self) -> &str;
+    fn is_enabled(&self) -> bool;
+    fn extract_ticket_id(&self, activity: &ActivityInfo) -> Option<String>;
+    async fn sync_time_entry(&self, activity: &ActivityInfo, ticket_id: &str) -> Result<SyncResult, String>;
+    async fn test_connection(&self) -> Result<bool, String>;
+}
+```
+
 ### Frontend (TypeScript - `app/src/main.ts`)
 
 - **Timeline View**: Chronological list of activities with color-coded apps and domain info
@@ -90,6 +143,8 @@ The application detects browser processes and extracts the current URL from the 
 - **Domain Summary View**: Per-domain browser usage statistics
 - **Auto-refresh**: Updates every 30 seconds when viewing today's data
 - **Date Picker**: View historical data by date
+- **Integrations Modal**: Configure and manage external service plugins
+- **Sync Buttons**: One-click sync of time entries to external services when ticket IDs are detected
 
 ### Data Model
 
@@ -191,6 +246,50 @@ To add support for a new browser:
 1. Add the process name to `BROWSER_PROCESSES` array in `windows_watcher` module
 2. Test that UI Automation can find the address bar (may need browser-specific logic)
 
+### Adding a New External Integration Plugin
+
+1. Create a new file in `app/src-tauri/src/plugins/integrations/` (e.g., `jira.rs`)
+
+2. Implement the `ExternalIntegration` trait:
+   ```rust
+   use async_trait::async_trait;
+   use crate::plugins::traits::{ActivityInfo, ExternalIntegration, SyncResult};
+
+   pub struct JiraIntegration { /* ... */ }
+
+   #[async_trait]
+   impl ExternalIntegration for JiraIntegration {
+       fn name(&self) -> &str { "jira" }
+       fn display_name(&self) -> &str { "Jira" }
+       // ... implement other methods
+   }
+   ```
+
+3. Add config struct in `app/src-tauri/src/plugins/config.rs`:
+   ```rust
+   #[derive(Debug, Clone, Serialize, Deserialize)]
+   pub struct JiraConfig {
+       pub url: String,
+       pub api_token: String,
+       pub rules: Vec<ExtractionRule>,
+   }
+   ```
+
+4. Add variant to `IntegrationConfig` enum:
+   ```rust
+   #[serde(tag = "type")]
+   pub enum IntegrationConfig {
+       #[serde(rename = "redmine")]
+       Redmine(RedmineConfig),
+       #[serde(rename = "jira")]
+       Jira(JiraConfig),
+   }
+   ```
+
+5. Register in `PluginManager::load_from_config()` in `plugins/mod.rs`
+
+6. Export from `plugins/integrations/mod.rs`
+
 ## Dependencies
 
 ### Rust (Cargo.toml)
@@ -210,6 +309,10 @@ To add support for a new browser:
   - `Win32_UI_Accessibility` - For browser URL extraction
   - `Win32_System_Com` - COM initialization for UI Automation
 - `url` 2.x (Windows-only) - URL parsing for domain extraction
+- `toml` 0.8 - TOML config file parsing
+- `regex` 1.x - Regular expression for ticket ID extraction
+- `async-trait` 0.1 - Async trait support for plugins
+- `reqwest` 0.12 - HTTP client for external API calls
 
 ### Node.js (package.json)
 

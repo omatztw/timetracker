@@ -12,6 +12,10 @@ use tauri::{
     WindowEvent,
 };
 
+pub mod plugins;
+
+use plugins::{PluginManager, traits::{ActivityInfo, SyncResult}, config::IntegrationsConfig};
+
 #[cfg(target_os = "windows")]
 mod windows_watcher {
     use windows::Win32::Foundation::HWND;
@@ -231,6 +235,7 @@ pub struct DomainSummary {
 pub struct AppState {
     db: Mutex<Connection>,
     is_tracking: Mutex<bool>,
+    plugin_manager: PluginManager,
 }
 
 impl AppState {
@@ -270,9 +275,16 @@ impl AppState {
             [],
         )?;
 
+        // プラグインマネージャーを初期化
+        let plugin_manager = PluginManager::new();
+        if let Err(e) = plugin_manager.load_from_config() {
+            eprintln!("Failed to load plugins: {}", e);
+        }
+
         Ok(Self {
             db: Mutex::new(conn),
             is_tracking: Mutex::new(false),
+            plugin_manager,
         })
     }
 }
@@ -414,6 +426,112 @@ fn get_domain_summary(state: State<Arc<AppState>>, date: String) -> Result<Vec<D
     Ok(result)
 }
 
+// ========== プラグイン関連コマンド ==========
+
+/// プラグイン一覧を取得
+#[tauri::command]
+fn get_plugins(state: State<Arc<AppState>>) -> Vec<String> {
+    state.plugin_manager.list_plugins()
+}
+
+/// プラグイン設定を再読み込み
+#[tauri::command]
+fn reload_plugins(state: State<Arc<AppState>>) -> Result<(), String> {
+    state.plugin_manager.load_from_config()
+}
+
+/// サンプル設定ファイルを作成
+#[tauri::command]
+fn create_sample_plugin_config() -> Result<String, String> {
+    plugins::create_sample_config()?;
+    Ok(IntegrationsConfig::config_path().to_string_lossy().to_string())
+}
+
+/// 設定ファイルのパスを取得
+#[tauri::command]
+fn get_plugin_config_path() -> String {
+    IntegrationsConfig::config_path().to_string_lossy().to_string()
+}
+
+/// アクティビティからチケットIDを抽出
+#[tauri::command]
+fn extract_ticket_ids(
+    state: State<Arc<AppState>>,
+    activity_id: i64,
+) -> Result<Vec<(String, String)>, String> {
+    let db = state.db.lock();
+
+    let mut stmt = db
+        .prepare(
+            "SELECT id, process_name, window_title, domain, start_time, end_time, duration_seconds
+             FROM activities WHERE id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let activity = stmt
+        .query_row(params![activity_id], |row| {
+            Ok(ActivityInfo {
+                id: row.get(0)?,
+                process_name: row.get(1)?,
+                window_title: row.get(2)?,
+                domain: row.get(3)?,
+                start_time: row.get(4)?,
+                end_time: row.get(5)?,
+                duration_seconds: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(state.plugin_manager.extract_all_ticket_ids(&activity))
+}
+
+/// 作業時間を外部サービスに同期
+#[tauri::command]
+async fn sync_time_entry(
+    state: State<'_, Arc<AppState>>,
+    plugin_name: String,
+    activity_id: i64,
+    ticket_id: String,
+) -> Result<SyncResult, String> {
+    let activity = {
+        let db = state.db.lock();
+
+        let mut stmt = db
+            .prepare(
+                "SELECT id, process_name, window_title, domain, start_time, end_time, duration_seconds
+                 FROM activities WHERE id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+
+        stmt.query_row(params![activity_id], |row| {
+            Ok(ActivityInfo {
+                id: row.get(0)?,
+                process_name: row.get(1)?,
+                window_title: row.get(2)?,
+                domain: row.get(3)?,
+                start_time: row.get(4)?,
+                end_time: row.get(5)?,
+                duration_seconds: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+    };
+
+    state
+        .plugin_manager
+        .sync_time_entry(&plugin_name, &activity, &ticket_id)
+        .await
+}
+
+/// プラグインの接続テスト
+#[tauri::command]
+async fn test_plugin_connection(
+    state: State<'_, Arc<AppState>>,
+    plugin_name: String,
+) -> Result<bool, String> {
+    state.plugin_manager.test_connection(&plugin_name).await
+}
+
 fn start_watcher_thread(state: Arc<AppState>) {
     thread::spawn(move || {
         let mut last_process = String::new();
@@ -547,6 +665,13 @@ pub fn run() {
             get_activities,
             get_app_summary,
             get_domain_summary,
+            get_plugins,
+            reload_plugins,
+            create_sample_plugin_config,
+            get_plugin_config_path,
+            extract_ticket_ids,
+            sync_time_entry,
+            test_plugin_connection,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
