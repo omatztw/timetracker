@@ -31,6 +31,9 @@ interface SyncResult {
 // Store detected ticket IDs for each activity
 const activityTickets: Map<number, Array<[string, string]>> = new Map();
 
+// Current app filter (null = show all)
+let currentAppFilter: string | null = null;
+
 // Color palette for apps
 const APP_COLORS: Record<string, string> = {};
 const COLOR_PALETTE = [
@@ -95,9 +98,20 @@ async function loadActivities(date: string): Promise<void> {
     const plugins = await invoke<string[]>("get_plugins");
     const hasPlugins = plugins.length > 0;
 
+    // Apply app filter to activities
+    const filteredActivities = currentAppFilter
+      ? activities.filter((a) => a.process_name === currentAppFilter)
+      : activities;
+
+    // Update filter indicator
+    updateFilterIndicator();
+
     // Render timeline
-    if (activities.length === 0) {
-      timelineEl.innerHTML = '<div class="empty-state">No activities recorded for this date</div>';
+    if (filteredActivities.length === 0) {
+      const message = currentAppFilter
+        ? `No activities for ${currentAppFilter}`
+        : "No activities recorded for this date";
+      timelineEl.innerHTML = `<div class="empty-state">${escapeHtml(message)}</div>`;
     } else {
       // Extract ticket IDs for all activities if plugins are available
       if (hasPlugins) {
@@ -115,7 +129,7 @@ async function loadActivities(date: string): Promise<void> {
         }
       }
 
-      timelineEl.innerHTML = activities
+      timelineEl.innerHTML = filteredActivities
         .map((activity) => {
           const color = getAppColor(activity.process_name);
           const tickets = activityTickets.get(activity.id) || [];
@@ -158,8 +172,9 @@ async function loadActivities(date: string): Promise<void> {
       summaryEl.innerHTML = summary
         .map((app) => {
           const color = getAppColor(app.process_name);
+          const isActive = currentAppFilter === app.process_name;
           return `
-            <div class="summary-item">
+            <div class="summary-item summary-item-clickable${isActive ? " summary-item-active" : ""}" data-app="${escapeHtml(app.process_name)}">
               <div class="summary-bar" style="width: ${app.percentage}%; background-color: ${color}"></div>
               <div class="summary-info">
                 <span class="summary-app">${escapeHtml(app.process_name)}</span>
@@ -171,6 +186,11 @@ async function loadActivities(date: string): Promise<void> {
           `;
         })
         .join("");
+
+      // Add click handlers to summary items
+      summaryEl.querySelectorAll(".summary-item-clickable").forEach((item) => {
+        item.addEventListener("click", handleAppFilterClick);
+      });
     }
 
     // Render domain summary
@@ -207,6 +227,42 @@ function escapeHtml(text: string): string {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+function updateFilterIndicator(): void {
+  const filterIndicator = document.getElementById("filter-indicator")!;
+  const filterApp = document.getElementById("filter-app")!;
+
+  if (currentAppFilter) {
+    filterApp.textContent = currentAppFilter;
+    filterIndicator.classList.remove("hidden");
+  } else {
+    filterIndicator.classList.add("hidden");
+  }
+}
+
+function handleAppFilterClick(event: Event): void {
+  const item = event.currentTarget as HTMLElement;
+  const appName = item.dataset.app;
+
+  if (!appName) return;
+
+  // Toggle filter: if same app clicked, clear filter
+  if (currentAppFilter === appName) {
+    currentAppFilter = null;
+  } else {
+    currentAppFilter = appName;
+  }
+
+  // Reload activities with new filter
+  const datePicker = document.getElementById("date-picker") as HTMLInputElement;
+  loadActivities(datePicker.value);
+}
+
+function clearAppFilter(): void {
+  currentAppFilter = null;
+  const datePicker = document.getElementById("date-picker") as HTMLInputElement;
+  loadActivities(datePicker.value);
 }
 
 async function updateTrackingButton(): Promise<void> {
@@ -336,6 +392,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   const createSampleBtn = document.getElementById("create-sample-config")!;
   const reloadPluginsBtn = document.getElementById("reload-plugins")!;
   const modal = document.getElementById("integrations-modal")!;
+  const clearFilterBtn = document.getElementById("clear-filter")!;
 
   // Set today's date
   datePicker.value = getToday();
@@ -350,6 +407,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   toggleButton.addEventListener("click", toggleTracking);
+
+  // Filter clear button
+  clearFilterBtn.addEventListener("click", clearAppFilter);
 
   // Integrations modal events
   integrationsBtn.addEventListener("click", openIntegrationsModal);

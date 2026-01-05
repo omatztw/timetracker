@@ -472,6 +472,76 @@ section h2 {
   margin-left: 0.5rem;
 }
 
+/* Timeline Header with Filter */
+.timeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.timeline-header h2 {
+  margin-bottom: 0;
+}
+
+.filter-indicator {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background-color: var(--accent);
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.filter-indicator.hidden {
+  display: none;
+}
+
+.filter-label {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.filter-app {
+  font-weight: 600;
+  color: white;
+}
+
+.btn-clear-filter {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  margin-left: 0.25rem;
+  opacity: 0.8;
+  transition: opacity 0.2s;
+}
+
+.btn-clear-filter:hover {
+  opacity: 1;
+}
+
+/* Clickable Summary Items */
+.summary-item-clickable {
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.summary-item-clickable:hover {
+  transform: translateX(4px);
+}
+
+.summary-item-active {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.summary-item-active .summary-bar {
+  opacity: 0.4;
+}
+
 /* Light mode support */
 @media (prefers-color-scheme: light) {
   :root {
