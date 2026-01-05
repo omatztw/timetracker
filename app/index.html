@@ -51,7 +51,14 @@
 
       <main class="main">
         <section class="timeline-section">
-          <h2>Timeline</h2>
+          <div class="timeline-header">
+            <h2>Timeline</h2>
+            <div id="filter-indicator" class="filter-indicator hidden">
+              <span class="filter-label">Filtering:</span>
+              <span id="filter-app" class="filter-app"></span>
+              <button id="clear-filter" class="btn-clear-filter" title="Clear filter">&times;</button>
+            </div>
+          </div>
           <div id="timeline" class="timeline"></div>
         </section>
 
