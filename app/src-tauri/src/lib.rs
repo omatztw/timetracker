@@ -532,6 +532,66 @@ async fn test_plugin_connection(
     state.plugin_manager.test_connection(&plugin_name).await
 }
 
+/// タイムラインをCSV形式でエクスポート
+#[tauri::command]
+fn export_timeline_csv(state: State<Arc<AppState>>, date: String) -> Result<String, String> {
+    let db = state.db.lock();
+    let start_of_day = format!("{}T00:00:00", date);
+    let end_of_day = format!("{}T23:59:59", date);
+
+    let mut stmt = db
+        .prepare(
+            "SELECT id, process_name, window_title, domain, start_time, end_time, duration_seconds
+             FROM activities
+             WHERE start_time >= ?1 AND start_time <= ?2
+             ORDER BY start_time ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let records: Vec<ActivityRecord> = stmt
+        .query_map(params![start_of_day, end_of_day], |row| {
+            Ok(ActivityRecord {
+                id: row.get(0)?,
+                process_name: row.get(1)?,
+                window_title: row.get(2)?,
+                domain: row.get(3)?,
+                start_time: row.get(4)?,
+                end_time: row.get(5)?,
+                duration_seconds: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    // Build CSV
+    let mut csv = String::new();
+    csv.push_str("start_time,end_time,duration_seconds,process_name,window_title,domain\n");
+
+    for record in records {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{}\n",
+            escape_csv_field(&record.start_time),
+            escape_csv_field(&record.end_time),
+            record.duration_seconds,
+            escape_csv_field(&record.process_name),
+            escape_csv_field(&record.window_title),
+            escape_csv_field(&record.domain.unwrap_or_default()),
+        ));
+    }
+
+    Ok(csv)
+}
+
+/// CSV用にフィールドをエスケープ
+fn escape_csv_field(field: &str) -> String {
+    if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_string()
+    }
+}
+
 fn start_watcher_thread(state: Arc<AppState>) {
     thread::spawn(move || {
         let mut last_process = String::new();
@@ -672,6 +732,7 @@ pub fn run() {
             extract_ticket_ids,
             sync_time_entry,
             test_plugin_connection,
+            export_timeline_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

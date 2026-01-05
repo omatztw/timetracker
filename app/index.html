@@ -53,10 +53,13 @@
         <section class="timeline-section">
           <div class="timeline-header">
             <h2>Timeline</h2>
-            <div id="filter-indicator" class="filter-indicator hidden">
-              <span class="filter-label">Filtering:</span>
-              <span id="filter-app" class="filter-app"></span>
-              <button id="clear-filter" class="btn-clear-filter" title="Clear filter">&times;</button>
+            <div class="timeline-header-right">
+              <div id="filter-indicator" class="filter-indicator hidden">
+                <span class="filter-label">Filtering:</span>
+                <span id="filter-app" class="filter-app"></span>
+                <button id="clear-filter" class="btn-clear-filter" title="Clear filter">&times;</button>
+              </div>
+              <button id="export-csv-btn" class="btn btn-small" title="Export to CSV">Export CSV</button>
             </div>
           </div>
           <div id="timeline" class="timeline"></div>

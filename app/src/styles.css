@@ -484,6 +484,12 @@ section h2 {
   margin-bottom: 0;
 }
 
+.timeline-header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .filter-indicator {
   display: flex;
   align-items: center;
