@@ -2,8 +2,8 @@ pub mod config;
 pub mod integrations;
 pub mod traits;
 
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::sync::Arc;
 
 use config::{IntegrationConfig, IntegrationsConfig};
 use integrations::RedmineIntegration;
@@ -33,15 +33,12 @@ impl PluginManager {
                 continue;
             }
 
-            let plugin: Arc<dyn ExternalIntegration> = match entry.config {
-                IntegrationConfig::Redmine(redmine_config) => {
-                    Arc::new(RedmineIntegration::new(
-                        entry.name,
-                        entry.enabled,
-                        redmine_config,
-                    )?)
-                }
-            };
+            let plugin: Arc<dyn ExternalIntegration> =
+                match entry.config {
+                    IntegrationConfig::Redmine(redmine_config) => Arc::new(
+                        RedmineIntegration::new(entry.name, entry.enabled, redmine_config)?,
+                    ),
+                };
 
             plugins.push(plugin);
         }

@@ -127,22 +127,27 @@ impl ExternalIntegration for RedmineIntegration {
         let hours = activity.duration_seconds as f64 / 3600.0;
 
         // 日付を抽出（YYYY-MM-DD形式）
-        let spent_on = activity.start_time.split('T').next().unwrap_or("").to_string();
+        let spent_on = activity
+            .start_time
+            .split('T')
+            .next()
+            .unwrap_or("")
+            .to_string();
 
         let request = TimeEntryRequest {
             time_entry: TimeEntryData {
                 issue_id,
                 hours,
                 activity_id: self.config.default_activity_id,
-                comments: format!(
-                    "{} - {}",
-                    activity.process_name, activity.window_title
-                ),
+                comments: format!("{} - {}", activity.process_name, activity.window_title),
                 spent_on,
             },
         };
 
-        let url = format!("{}/time_entries.json", self.config.url.trim_end_matches('/'));
+        let url = format!(
+            "{}/time_entries.json",
+            self.config.url.trim_end_matches('/')
+        );
 
         let response = self
             .client
