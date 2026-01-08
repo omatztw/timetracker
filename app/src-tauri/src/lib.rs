@@ -1,34 +1,43 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use parking_lot::Mutex;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{
-    AppHandle, Manager, State,
     menu::{Menu, MenuItem},
-    tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
-    WindowEvent,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Manager, State, WindowEvent,
 };
 
 pub mod plugins;
 
-use plugins::{PluginManager, traits::{ActivityInfo, SyncResult}, config::IntegrationsConfig};
+use plugins::{
+    config::IntegrationsConfig,
+    traits::{ActivityInfo, SyncResult},
+    PluginManager,
+};
 
 #[cfg(target_os = "windows")]
 mod windows_watcher {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
-    use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
-    use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationCondition,
-        UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_NamePropertyId,
-        UIA_ValueValuePropertyId, TreeScope_Subtree,
-    };
-    use windows::Win32::System::Com::{CoInitializeEx, CoCreateInstance, CLSCTX_ALL, COINIT_MULTITHREADED};
     use url::Url;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+        TreeScope_Subtree, UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_NamePropertyId,
+        UIA_ValueValuePropertyId,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    };
 
     // Browser process names
     const BROWSER_PROCESSES: &[&str] = &[
@@ -47,11 +56,53 @@ mod windows_watcher {
     }
 
     pub fn extract_domain(url_str: &str) -> Option<String> {
+        // Try parsing as full URL first
         if let Ok(url) = Url::parse(url_str) {
-            url.host_str().map(|h| h.to_string())
-        } else {
-            None
+            return url.host_str().map(|h| h.to_string());
         }
+
+        // Try adding https:// prefix for URLs without protocol
+        // Many browsers show URLs without the protocol (e.g., "github.com" instead of "https://github.com")
+        let with_protocol = format!("https://{}", url_str);
+        if let Ok(url) = Url::parse(&with_protocol) {
+            // Validate it looks like a real domain (has at least one dot)
+            if let Some(host) = url.host_str() {
+                if host.contains('.') {
+                    return Some(host.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check if a string looks like a URL (with or without protocol)
+    fn looks_like_url(s: &str) -> bool {
+        // Check for protocol prefix
+        if s.starts_with("http://") || s.starts_with("https://") {
+            return true;
+        }
+
+        // Check if it looks like a domain (contains dot and no spaces)
+        // e.g., "github.com", "www.google.com/search?q=test"
+        if !s.contains(' ') && !s.is_empty() {
+            // Find the domain part (before any path)
+            let domain_part = s.split('/').next().unwrap_or(s);
+            // Must contain a dot and have reasonable structure
+            if domain_part.contains('.') {
+                // Check it's not just numbers (like "1.0")
+                let parts: Vec<&str> = domain_part.split('.').collect();
+                if parts.len() >= 2 {
+                    // At least one part should not be purely numeric or empty
+                    let has_alpha = parts
+                        .iter()
+                        .any(|p| !p.is_empty() && p.chars().any(|c| c.is_alphabetic()));
+                    return has_alpha;
+                }
+            }
+        }
+
+        false
     }
 
     pub fn get_browser_url(hwnd: HWND) -> Option<String> {
@@ -60,7 +111,8 @@ mod windows_watcher {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
             // Create UI Automation instance
-            let automation: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL) {
+            let automation: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)
+            {
                 Ok(a) => a,
                 Err(_) => return None,
             };
@@ -93,15 +145,23 @@ mod windows_watcher {
                     // Check if this is the address bar by looking at the name property
                     if let Ok(name) = elem.GetCurrentPropertyValue(UIA_NamePropertyId) {
                         let name_str = name.to_string().to_lowercase();
-                        // Common address bar identifiers
-                        if name_str.contains("address") ||
-                           name_str.contains("url") ||
-                           name_str.contains("アドレス") ||
-                           name_str.contains("location") {
+                        // Common address bar identifiers (English, Japanese, and browser-specific)
+                        if name_str.contains("address")
+                            || name_str.contains("url")
+                            || name_str.contains("アドレス")
+                            || name_str.contains("location")
+                            || name_str.contains("omnibox")
+                            || name_str.contains("検索または")
+                            || name_str.contains("search or")
+                            || name_str.contains("検索またはアドレス")
+                        {
                             // Get the value (URL)
-                            if let Ok(value) = elem.GetCurrentPropertyValue(UIA_ValueValuePropertyId) {
+                            if let Ok(value) =
+                                elem.GetCurrentPropertyValue(UIA_ValueValuePropertyId)
+                            {
                                 let url_str = value.to_string();
-                                if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                                // Check for URLs with or without protocol prefix
+                                if looks_like_url(&url_str) {
                                     return Some(url_str);
                                 }
                             }
@@ -115,7 +175,8 @@ mod windows_watcher {
                 if let Ok(elem) = elements.GetElement(i) {
                     if let Ok(value) = elem.GetCurrentPropertyValue(UIA_ValueValuePropertyId) {
                         let url_str = value.to_string();
-                        if url_str.starts_with("http://") || url_str.starts_with("https://") {
+                        // Check for URLs with or without protocol prefix
+                        if looks_like_url(&url_str) {
                             return Some(url_str);
                         }
                     }
@@ -147,7 +208,11 @@ mod windows_watcher {
             GetWindowThreadProcessId(hwnd, Some(&mut process_id));
 
             let process_name = if process_id != 0 {
-                if let Ok(handle) = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, process_id) {
+                if let Ok(handle) = OpenProcess(
+                    PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                    false,
+                    process_id,
+                ) {
                     let mut name_buf = [0u16; 256];
                     let name_len = GetModuleBaseNameW(handle, None, &mut name_buf);
                     if name_len > 0 {
@@ -309,7 +374,10 @@ fn is_tracking(state: State<Arc<AppState>>) -> bool {
 }
 
 #[tauri::command]
-fn get_activities(state: State<Arc<AppState>>, date: String) -> Result<Vec<ActivityRecord>, String> {
+fn get_activities(
+    state: State<Arc<AppState>>,
+    date: String,
+) -> Result<Vec<ActivityRecord>, String> {
     let db = state.db.lock();
     let start_of_day = format!("{}T00:00:00", date);
     let end_of_day = format!("{}T23:59:59", date);
@@ -385,7 +453,10 @@ fn get_app_summary(state: State<Arc<AppState>>, date: String) -> Result<Vec<AppS
 }
 
 #[tauri::command]
-fn get_domain_summary(state: State<Arc<AppState>>, date: String) -> Result<Vec<DomainSummary>, String> {
+fn get_domain_summary(
+    state: State<Arc<AppState>>,
+    date: String,
+) -> Result<Vec<DomainSummary>, String> {
     let db = state.db.lock();
     let start_of_day = format!("{}T00:00:00", date);
     let end_of_day = format!("{}T23:59:59", date);
@@ -444,13 +515,17 @@ fn reload_plugins(state: State<Arc<AppState>>) -> Result<(), String> {
 #[tauri::command]
 fn create_sample_plugin_config() -> Result<String, String> {
     plugins::create_sample_config()?;
-    Ok(IntegrationsConfig::config_path().to_string_lossy().to_string())
+    Ok(IntegrationsConfig::config_path()
+        .to_string_lossy()
+        .to_string())
 }
 
 /// 設定ファイルのパスを取得
 #[tauri::command]
 fn get_plugin_config_path() -> String {
-    IntegrationsConfig::config_path().to_string_lossy().to_string()
+    IntegrationsConfig::config_path()
+        .to_string_lossy()
+        .to_string()
 }
 
 /// アクティビティからチケットIDを抽出
@@ -605,7 +680,13 @@ fn start_watcher_thread(state: Arc<AppState>) {
             if !*state.is_tracking.lock() {
                 // Save current activity before pausing
                 if let Some(start) = activity_start.take() {
-                    save_activity(&state, &last_process, &last_title, last_domain.as_deref(), start);
+                    save_activity(
+                        &state,
+                        &last_process,
+                        &last_title,
+                        last_domain.as_deref(),
+                        start,
+                    );
                 }
                 last_process.clear();
                 last_title.clear();
@@ -614,12 +695,20 @@ fn start_watcher_thread(state: Arc<AppState>) {
             }
 
             if let Some((process_name, window_title, domain)) = get_active_window_info() {
-                let changed = process_name != last_process || window_title != last_title || domain != last_domain;
+                let changed = process_name != last_process
+                    || window_title != last_title
+                    || domain != last_domain;
 
                 if changed {
                     // Save previous activity
                     if let Some(start) = activity_start.take() {
-                        save_activity(&state, &last_process, &last_title, last_domain.as_deref(), start);
+                        save_activity(
+                            &state,
+                            &last_process,
+                            &last_title,
+                            last_domain.as_deref(),
+                            start,
+                        );
                     }
 
                     // Start new activity
@@ -633,7 +722,13 @@ fn start_watcher_thread(state: Arc<AppState>) {
     });
 }
 
-fn save_activity(state: &Arc<AppState>, process_name: &str, window_title: &str, domain: Option<&str>, start: DateTime<Local>) {
+fn save_activity(
+    state: &Arc<AppState>,
+    process_name: &str,
+    window_title: &str,
+    domain: Option<&str>,
+    start: DateTime<Local>,
+) {
     if process_name.is_empty() {
         return;
     }
@@ -684,22 +779,25 @@ pub fn run() {
                 .menu(&menu)
                 .tooltip("TimeTracker - Running")
                 .icon(app.default_window_icon().unwrap().clone())
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        _ => {}
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "quit" => {
+                        app.exit(0);
                     }
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
