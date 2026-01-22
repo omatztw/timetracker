@@ -17,10 +17,14 @@
           <button id="toggle-tracking" class="btn btn-primary">
             Tracking: ON
           </button>
+          <button id="upload-btn" class="btn btn-secondary" title="Upload to server">
+            Upload
+          </button>
           <button id="integrations-btn" class="btn btn-secondary" title="External Integrations">
             Integrations
           </button>
         </div>
+        <div id="user-info" class="user-info"></div>
       </header>
 
       <!-- Integrations Modal -->
@@ -43,6 +47,12 @@
               <h4>Active Plugins</h4>
               <div id="plugins-list" class="plugins-list">
                 <p class="empty-state-small">No plugins configured</p>
+              </div>
+            </div>
+            <div class="upload-section">
+              <h4>Data Upload</h4>
+              <div id="upload-config-status" class="upload-config-status">
+                <p class="empty-state-small">Upload not configured</p>
               </div>
             </div>
           </div>
