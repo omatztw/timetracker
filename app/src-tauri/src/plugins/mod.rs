@@ -5,9 +5,11 @@ pub mod traits;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-use config::{IntegrationConfig, IntegrationsConfig};
+use config::{IntegrationConfig, IntegrationsConfig, UploadConfig};
 use integrations::RedmineIntegration;
 use traits::{ActivityInfo, ExternalIntegration, SyncResult};
+
+pub use config::UploadConfig;
 
 /// プラグインマネージャー
 pub struct PluginManager {
@@ -119,4 +121,10 @@ impl Default for PluginManager {
 pub fn create_sample_config() -> Result<(), String> {
     let config = IntegrationsConfig::create_sample();
     config.save()
+}
+
+/// アップロード設定を取得
+pub fn get_upload_config() -> Option<UploadConfig> {
+    let config = IntegrationsConfig::load();
+    config.upload
 }

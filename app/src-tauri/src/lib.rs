@@ -1,5 +1,6 @@
 use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use parking_lot::Mutex;
+use reqwest;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub mod plugins;
 use plugins::{
     config::IntegrationsConfig,
     traits::{ActivityInfo, SyncResult},
-    PluginManager,
+    PluginManager, UploadConfig,
 };
 
 #[cfg(target_os = "windows")]
@@ -271,6 +272,78 @@ mod windows_watcher {
 }
 
 use windows_watcher::get_active_window_info;
+
+// ========== ユーザー情報取得 ==========
+
+#[cfg(target_os = "windows")]
+mod user_info {
+    use windows::Win32::Foundation::ERROR_MORE_DATA;
+    use windows::Win32::Security::{GetUserNameExW, NameUserPrincipal, NameSamCompatible};
+
+    /// Get the current Windows user's UPN (User Principal Name)
+    /// e.g., "user@domain.com"
+    pub fn get_user_upn() -> Option<String> {
+        unsafe {
+            // First, try UPN format (user@domain.com)
+            let mut size: u32 = 0;
+            let _ = GetUserNameExW(NameUserPrincipal, None, &mut size);
+
+            if size > 0 {
+                let mut buffer = vec![0u16; size as usize];
+                if GetUserNameExW(
+                    NameUserPrincipal,
+                    Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+                    &mut size,
+                ).is_ok() {
+                    let name = String::from_utf16_lossy(&buffer[..size as usize - 1]);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+
+            // Fallback to SAM compatible format (DOMAIN\user)
+            let mut size: u32 = 0;
+            let _ = GetUserNameExW(NameSamCompatible, None, &mut size);
+
+            if size > 0 {
+                let mut buffer = vec![0u16; size as usize];
+                if GetUserNameExW(
+                    NameSamCompatible,
+                    Some(windows::core::PWSTR(buffer.as_mut_ptr())),
+                    &mut size,
+                ).is_ok() {
+                    let name = String::from_utf16_lossy(&buffer[..size as usize - 1]);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+
+            None
+        }
+    }
+
+    /// Get machine name
+    pub fn get_machine_name() -> Option<String> {
+        std::env::var("COMPUTERNAME").ok()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod user_info {
+    /// Stub for non-Windows platforms
+    pub fn get_user_upn() -> Option<String> {
+        // For development, return a demo user
+        Some(String::from("demo.user@example.com"))
+    }
+
+    pub fn get_machine_name() -> Option<String> {
+        std::env::var("HOSTNAME").ok().or_else(|| Some(String::from("dev-machine")))
+    }
+}
+
+use user_info::{get_machine_name, get_user_upn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityRecord {
@@ -667,6 +740,233 @@ fn escape_csv_field(field: &str) -> String {
     }
 }
 
+// ========== ユーザー情報・アップロード関連コマンド ==========
+
+/// 現在のWindowsユーザー情報
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurrentUserInfo {
+    pub user_id: String,
+    pub machine_name: Option<String>,
+}
+
+/// アップロード設定情報（フロントエンド用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadConfigInfo {
+    pub server_url: String,
+    pub enabled: bool,
+    pub auto_upload: bool,
+    pub auto_upload_interval_minutes: u32,
+    pub min_duration_seconds: u32,
+}
+
+/// アプリ使用時間サマリー（アップロード用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageSummary {
+    pub process_name: String,
+    pub total_seconds: i64,
+    /// ブラウザの場合のドメイン（ブラウザ以外はnull）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+/// アップロードリクエスト（集計データ形式）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UploadRequest {
+    user_id: String,
+    machine_name: Option<String>,
+    date: String,
+    min_duration_seconds: u32,
+    app_summaries: Vec<AppUsageSummary>,
+}
+
+/// アップロード結果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadResult {
+    pub success: bool,
+    pub message: String,
+    pub uploaded_count: usize,
+}
+
+/// 現在のユーザー情報を取得
+#[tauri::command]
+fn get_current_user() -> Result<CurrentUserInfo, String> {
+    let user_id = get_user_upn().ok_or_else(|| "Failed to get user information".to_string())?;
+    let machine_name = get_machine_name();
+
+    Ok(CurrentUserInfo {
+        user_id,
+        machine_name,
+    })
+}
+
+/// アップロード設定を取得
+#[tauri::command]
+fn get_upload_config() -> Option<UploadConfigInfo> {
+    plugins::get_upload_config().map(|c| UploadConfigInfo {
+        server_url: c.server_url,
+        enabled: c.enabled,
+        auto_upload: c.auto_upload,
+        auto_upload_interval_minutes: c.auto_upload_interval_minutes,
+        min_duration_seconds: c.min_duration_seconds,
+    })
+}
+
+/// ブラウザプロセス名のリスト
+const BROWSER_PROCESSES: &[&str] = &[
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+    "iexplore.exe",
+];
+
+/// プロセス名がブラウザかどうかを判定
+fn is_browser_process(process_name: &str) -> bool {
+    let lower = process_name.to_lowercase();
+    BROWSER_PROCESSES.iter().any(|b| lower == *b)
+}
+
+/// 指定日のアクティビティをサーバーにアップロード（集計・フィルタリング済み）
+#[tauri::command]
+async fn upload_activities(
+    state: State<'_, Arc<AppState>>,
+    date: String,
+) -> Result<UploadResult, String> {
+    use std::collections::HashMap;
+
+    // アップロード設定を取得
+    let upload_config =
+        plugins::get_upload_config().ok_or_else(|| "Upload not configured".to_string())?;
+
+    if !upload_config.enabled {
+        return Err("Upload is disabled".to_string());
+    }
+
+    if upload_config.server_url.is_empty() {
+        return Err("Server URL is not configured".to_string());
+    }
+
+    let min_duration = upload_config.min_duration_seconds as i64;
+
+    // ユーザー情報を取得
+    let user_id = get_user_upn().ok_or_else(|| "Failed to get user information".to_string())?;
+    let machine_name = get_machine_name();
+
+    // 指定日のアクティビティを取得して集計
+    let app_summaries = {
+        let db = state.db.lock();
+        let start_of_day = format!("{}T00:00:00", date);
+        let end_of_day = format!("{}T23:59:59", date);
+
+        // (process_name, domain) をキーにして集計
+        // ブラウザ以外: (process_name, None)
+        // ブラウザ: (process_name, Some(domain))
+        let mut totals: HashMap<(String, Option<String>), i64> = HashMap::new();
+
+        let mut stmt = db
+            .prepare(
+                "SELECT process_name, domain, duration_seconds
+                 FROM activities
+                 WHERE start_time >= ?1 AND start_time <= ?2",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let rows = stmt
+            .query_map(params![start_of_day, end_of_day], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+
+        for row in rows.flatten() {
+            let (process_name, domain, duration) = row;
+
+            let key = if is_browser_process(&process_name) {
+                // ブラウザの場合は (process_name, domain) で集計
+                let d = domain.filter(|s| !s.is_empty());
+                if d.is_some() {
+                    (process_name, d)
+                } else {
+                    continue; // ドメインがない場合はスキップ
+                }
+            } else {
+                // ブラウザ以外は (process_name, None) で集計
+                (process_name, None)
+            };
+
+            *totals.entry(key).or_insert(0) += duration;
+        }
+
+        // 閾値以上のものだけフィルタリング
+        let app_summaries: Vec<AppUsageSummary> = totals
+            .into_iter()
+            .filter(|(_, total)| *total >= min_duration)
+            .map(|((process_name, domain), total_seconds)| AppUsageSummary {
+                process_name,
+                total_seconds,
+                domain,
+            })
+            .collect();
+
+        app_summaries
+    };
+
+    if app_summaries.is_empty() {
+        return Ok(UploadResult {
+            success: true,
+            message: format!(
+                "No data to upload (no apps/domains used for {}+ seconds)",
+                min_duration
+            ),
+            uploaded_count: 0,
+        });
+    }
+
+    let uploaded_count = app_summaries.len();
+
+    // アップロードリクエストを作成
+    let request = UploadRequest {
+        user_id,
+        machine_name,
+        date: date.clone(),
+        min_duration_seconds: upload_config.min_duration_seconds,
+        app_summaries,
+    };
+
+    // HTTPクライアントでアップロード
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&upload_config.server_url)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload: {}", e))?;
+
+    if response.status().is_success() {
+        Ok(UploadResult {
+            success: true,
+            message: format!(
+                "Uploaded {} records (min {}s)",
+                uploaded_count, min_duration
+            ),
+            uploaded_count,
+        })
+    } else {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Err(format!("Upload failed with status {}: {}", status, body))
+    }
+}
+
 fn start_watcher_thread(state: Arc<AppState>) {
     thread::spawn(move || {
         let mut last_process = String::new();
@@ -831,6 +1131,9 @@ pub fn run() {
             sync_time_entry,
             test_plugin_connection,
             export_timeline_csv,
+            get_current_user,
+            get_upload_config,
+            upload_activities,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -28,6 +28,25 @@ interface SyncResult {
   external_id: string | null;
 }
 
+interface CurrentUserInfo {
+  user_id: string;
+  machine_name: string | null;
+}
+
+interface UploadConfigInfo {
+  server_url: string;
+  enabled: boolean;
+  auto_upload: boolean;
+  auto_upload_interval_minutes: number;
+  min_duration_seconds: number;
+}
+
+interface UploadResult {
+  success: boolean;
+  message: string;
+  uploaded_count: number;
+}
+
 // Store detected ticket IDs for each activity
 const activityTickets: Map<number, Array<[string, string]>> = new Map();
 
@@ -409,6 +428,101 @@ async function exportTimelineCsv(): Promise<void> {
   }
 }
 
+// ========== Upload Functions ==========
+
+async function loadUserInfo(): Promise<void> {
+  const userInfoEl = document.getElementById("user-info")!;
+
+  try {
+    const userInfo = await invoke<CurrentUserInfo>("get_current_user");
+    userInfoEl.innerHTML = `
+      <span class="user-id" title="User ID">${escapeHtml(userInfo.user_id)}</span>
+      ${userInfo.machine_name ? `<span class="machine-name" title="Machine">@ ${escapeHtml(userInfo.machine_name)}</span>` : ""}
+    `;
+  } catch (error) {
+    console.error("Failed to load user info:", error);
+    userInfoEl.innerHTML = '<span class="user-error">User info unavailable</span>';
+  }
+}
+
+async function loadUploadConfig(): Promise<void> {
+  const uploadConfigStatusEl = document.getElementById("upload-config-status")!;
+  const uploadBtn = document.getElementById("upload-btn") as HTMLButtonElement;
+
+  try {
+    const config = await invoke<UploadConfigInfo | null>("get_upload_config");
+
+    if (config && config.enabled) {
+      const minMinutes = Math.floor(config.min_duration_seconds / 60);
+      uploadConfigStatusEl.innerHTML = `
+        <div class="upload-status-item">
+          <span class="label">Server:</span>
+          <span class="value">${escapeHtml(config.server_url)}</span>
+        </div>
+        <div class="upload-status-item">
+          <span class="label">Min duration:</span>
+          <span class="value">${minMinutes} min</span>
+        </div>
+        <div class="upload-status-item">
+          <span class="label">Auto-upload:</span>
+          <span class="value">${config.auto_upload ? `Enabled (every ${config.auto_upload_interval_minutes} min)` : "Disabled"}</span>
+        </div>
+      `;
+      uploadBtn.disabled = false;
+      uploadBtn.title = "Upload activities to server";
+    } else {
+      uploadConfigStatusEl.innerHTML = '<p class="empty-state-small">Upload not configured or disabled. Edit integrations.toml to enable.</p>';
+      uploadBtn.disabled = true;
+      uploadBtn.title = "Upload not configured";
+    }
+  } catch (error) {
+    console.error("Failed to load upload config:", error);
+    uploadConfigStatusEl.innerHTML = '<p class="empty-state-small">Failed to load upload configuration</p>';
+    uploadBtn.disabled = true;
+  }
+}
+
+async function uploadActivities(): Promise<void> {
+  const uploadBtn = document.getElementById("upload-btn") as HTMLButtonElement;
+  const datePicker = document.getElementById("date-picker") as HTMLInputElement;
+  const statusEl = document.getElementById("status")!;
+  const date = datePicker.value;
+
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = "Uploading...";
+  statusEl.textContent = "Uploading activities...";
+
+  try {
+    const result = await invoke<UploadResult>("upload_activities", { date });
+
+    if (result.success) {
+      statusEl.textContent = result.message;
+      if (result.uploaded_count > 0) {
+        uploadBtn.textContent = `Uploaded!`;
+      } else {
+        uploadBtn.textContent = "No data";
+      }
+      uploadBtn.style.backgroundColor = "var(--success)";
+    } else {
+      statusEl.textContent = `Upload failed: ${result.message}`;
+      uploadBtn.textContent = "Failed";
+      uploadBtn.style.backgroundColor = "var(--warning)";
+    }
+  } catch (error) {
+    console.error("Failed to upload:", error);
+    statusEl.textContent = `Upload error: ${error}`;
+    uploadBtn.textContent = "Error";
+    uploadBtn.style.backgroundColor = "var(--warning)";
+  }
+
+  // Reset button after 3 seconds
+  setTimeout(async () => {
+    uploadBtn.textContent = "Upload";
+    uploadBtn.style.backgroundColor = "";
+    await loadUploadConfig(); // Re-check if upload is enabled
+  }, 3000);
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
   const datePicker = document.getElementById("date-picker") as HTMLInputElement;
   const toggleButton = document.getElementById("toggle-tracking")!;
@@ -417,6 +531,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   const createSampleBtn = document.getElementById("create-sample-config")!;
   const reloadPluginsBtn = document.getElementById("reload-plugins")!;
   const exportCsvBtn = document.getElementById("export-csv-btn")!;
+  const uploadBtn = document.getElementById("upload-btn")!;
   const modal = document.getElementById("integrations-modal")!;
   const clearFilterBtn = document.getElementById("clear-filter")!;
 
@@ -426,6 +541,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   // Load initial data
   await loadActivities(datePicker.value);
   await updateTrackingButton();
+  await loadUserInfo();
+  await loadUploadConfig();
 
   // Event listeners
   datePicker.addEventListener("change", () => {
@@ -445,6 +562,9 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   // CSV export
   exportCsvBtn.addEventListener("click", exportTimelineCsv);
+
+  // Upload button
+  uploadBtn.addEventListener("click", uploadActivities);
 
   // Close modal when clicking outside
   modal.addEventListener("click", (e) => {

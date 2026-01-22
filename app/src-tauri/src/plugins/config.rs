@@ -45,11 +45,53 @@ fn default_enabled() -> bool {
     true
 }
 
+/// アップロード設定
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadConfig {
+    /// アップロード先サーバーURL (e.g., "https://timetracker.example.com/api")
+    pub server_url: String,
+    /// アップロードを有効にするかどうか
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// 自動アップロードを有効にするかどうか
+    #[serde(default)]
+    pub auto_upload: bool,
+    /// 自動アップロード間隔（分）
+    #[serde(default = "default_upload_interval")]
+    pub auto_upload_interval_minutes: u32,
+    /// アップロード対象の最小時間（秒）- この時間以上使用したアプリ/ドメインのみアップロード
+    #[serde(default = "default_min_duration")]
+    pub min_duration_seconds: u32,
+}
+
+fn default_upload_interval() -> u32 {
+    60 // デフォルト1時間ごと
+}
+
+fn default_min_duration() -> u32 {
+    600 // デフォルト10分
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            enabled: false,
+            auto_upload: false,
+            auto_upload_interval_minutes: default_upload_interval(),
+            min_duration_seconds: default_min_duration(),
+        }
+    }
+}
+
 /// 全体設定ファイル
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IntegrationsConfig {
     #[serde(default)]
     pub integrations: Vec<IntegrationEntry>,
+    /// データアップロード設定
+    #[serde(default)]
+    pub upload: Option<UploadConfig>,
 }
 
 impl IntegrationsConfig {
@@ -113,6 +155,13 @@ impl IntegrationsConfig {
                     ],
                 }),
             }],
+            upload: Some(UploadConfig {
+                server_url: "https://timetracker.example.com/api/upload".to_string(),
+                enabled: false,
+                auto_upload: false,
+                auto_upload_interval_minutes: 60,
+                min_duration_seconds: 600, // 10分以上使用したアプリ/ドメインのみ
+            }),
         }
     }
 }

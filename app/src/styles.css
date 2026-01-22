@@ -392,12 +392,14 @@ section h2 {
 }
 
 .config-section,
-.plugins-section {
+.plugins-section,
+.upload-section {
   margin-bottom: 1.5rem;
 }
 
 .config-section h4,
-.plugins-section h4 {
+.plugins-section h4,
+.upload-section h4 {
   font-size: 0.95rem;
   font-weight: 600;
   margin-bottom: 0.75rem;
@@ -568,6 +570,67 @@ section h2 {
 
 .summary-item-active .summary-bar {
   opacity: 0.4;
+}
+
+/* User Info in Header */
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.user-info .user-id {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.user-info .machine-name {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.user-info .user-error {
+  color: var(--warning);
+}
+
+/* Upload Config Status */
+.upload-config-status {
+  background-color: var(--bg-card);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.upload-status-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.upload-status-item:last-child {
+  border-bottom: none;
+}
+
+.upload-status-item .label {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.upload-status-item .value {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  word-break: break-all;
+  text-align: right;
+  max-width: 60%;
+}
+
+/* Upload Button States */
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Light mode support */
