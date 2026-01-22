@@ -38,12 +38,14 @@ interface UploadConfigInfo {
   enabled: boolean;
   auto_upload: boolean;
   auto_upload_interval_minutes: number;
+  min_duration_seconds: number;
 }
 
 interface UploadResult {
   success: boolean;
   message: string;
-  uploaded_count: number;
+  app_count: number;
+  domain_count: number;
 }
 
 // Store detected ticket IDs for each activity
@@ -452,10 +454,15 @@ async function loadUploadConfig(): Promise<void> {
     const config = await invoke<UploadConfigInfo | null>("get_upload_config");
 
     if (config && config.enabled) {
+      const minMinutes = Math.floor(config.min_duration_seconds / 60);
       uploadConfigStatusEl.innerHTML = `
         <div class="upload-status-item">
           <span class="label">Server:</span>
           <span class="value">${escapeHtml(config.server_url)}</span>
+        </div>
+        <div class="upload-status-item">
+          <span class="label">Min duration:</span>
+          <span class="value">${minMinutes} min</span>
         </div>
         <div class="upload-status-item">
           <span class="label">Auto-upload:</span>
@@ -491,7 +498,11 @@ async function uploadActivities(): Promise<void> {
 
     if (result.success) {
       statusEl.textContent = result.message;
-      uploadBtn.textContent = "Uploaded!";
+      if (result.app_count > 0 || result.domain_count > 0) {
+        uploadBtn.textContent = `Uploaded!`;
+      } else {
+        uploadBtn.textContent = "No data";
+      }
       uploadBtn.style.backgroundColor = "var(--success)";
     } else {
       statusEl.textContent = `Upload failed: ${result.message}`;

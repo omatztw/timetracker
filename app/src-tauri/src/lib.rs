@@ -756,14 +756,32 @@ pub struct UploadConfigInfo {
     pub enabled: bool,
     pub auto_upload: bool,
     pub auto_upload_interval_minutes: u32,
+    pub min_duration_seconds: u32,
 }
 
-/// アップロードリクエスト
+/// アプリ使用時間サマリー（アップロード用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppUsageSummary {
+    pub process_name: String,
+    pub total_seconds: i64,
+}
+
+/// ドメイン使用時間サマリー（アップロード用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainUsageSummary {
+    pub domain: String,
+    pub total_seconds: i64,
+}
+
+/// アップロードリクエスト（集計データ形式）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct UploadRequest {
     user_id: String,
     machine_name: Option<String>,
-    activities: Vec<ActivityRecord>,
+    date: String,
+    min_duration_seconds: u32,
+    app_summaries: Vec<AppUsageSummary>,
+    domain_summaries: Vec<DomainUsageSummary>,
 }
 
 /// アップロード結果
@@ -771,7 +789,8 @@ struct UploadRequest {
 pub struct UploadResult {
     pub success: bool,
     pub message: String,
-    pub uploaded_count: usize,
+    pub app_count: usize,
+    pub domain_count: usize,
 }
 
 /// 現在のユーザー情報を取得
@@ -794,15 +813,35 @@ fn get_upload_config() -> Option<UploadConfigInfo> {
         enabled: c.enabled,
         auto_upload: c.auto_upload,
         auto_upload_interval_minutes: c.auto_upload_interval_minutes,
+        min_duration_seconds: c.min_duration_seconds,
     })
 }
 
-/// 指定日のアクティビティをサーバーにアップロード
+/// ブラウザプロセス名のリスト
+const BROWSER_PROCESSES: &[&str] = &[
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "brave.exe",
+    "opera.exe",
+    "vivaldi.exe",
+    "iexplore.exe",
+];
+
+/// プロセス名がブラウザかどうかを判定
+fn is_browser_process(process_name: &str) -> bool {
+    let lower = process_name.to_lowercase();
+    BROWSER_PROCESSES.iter().any(|b| lower == *b)
+}
+
+/// 指定日のアクティビティをサーバーにアップロード（集計・フィルタリング済み）
 #[tauri::command]
 async fn upload_activities(
     state: State<'_, Arc<AppState>>,
     date: String,
 ) -> Result<UploadResult, String> {
+    use std::collections::HashMap;
+
     // アップロード設定を取得
     let upload_config =
         plugins::get_upload_config().ok_or_else(|| "Upload not configured".to_string())?;
@@ -815,59 +854,102 @@ async fn upload_activities(
         return Err("Server URL is not configured".to_string());
     }
 
+    let min_duration = upload_config.min_duration_seconds as i64;
+
     // ユーザー情報を取得
     let user_id = get_user_upn().ok_or_else(|| "Failed to get user information".to_string())?;
     let machine_name = get_machine_name();
 
-    // 指定日のアクティビティを取得
-    let activities = {
+    // 指定日のアクティビティを取得して集計
+    let (app_summaries, domain_summaries) = {
         let db = state.db.lock();
         let start_of_day = format!("{}T00:00:00", date);
         let end_of_day = format!("{}T23:59:59", date);
 
+        // アプリ別集計（ブラウザ以外）
+        let mut app_totals: HashMap<String, i64> = HashMap::new();
+        // ドメイン別集計（ブラウザのドメイン）
+        let mut domain_totals: HashMap<String, i64> = HashMap::new();
+
         let mut stmt = db
             .prepare(
-                "SELECT id, process_name, window_title, domain, start_time, end_time, duration_seconds
+                "SELECT process_name, domain, duration_seconds
                  FROM activities
-                 WHERE start_time >= ?1 AND start_time <= ?2
-                 ORDER BY start_time ASC",
+                 WHERE start_time >= ?1 AND start_time <= ?2",
             )
             .map_err(|e| e.to_string())?;
 
-        let records: Vec<ActivityRecord> = stmt
+        let rows = stmt
             .query_map(params![start_of_day, end_of_day], |row| {
-                Ok(ActivityRecord {
-                    id: row.get(0)?,
-                    process_name: row.get(1)?,
-                    window_title: row.get(2)?,
-                    domain: row.get(3)?,
-                    start_time: row.get(4)?,
-                    end_time: row.get(5)?,
-                    duration_seconds: row.get(6)?,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })
-            .map_err(|e| e.to_string())?
-            .filter_map(|r| r.ok())
+            .map_err(|e| e.to_string())?;
+
+        for row in rows.flatten() {
+            let (process_name, domain, duration) = row;
+
+            if is_browser_process(&process_name) {
+                // ブラウザの場合はドメイン別に集計
+                if let Some(d) = domain {
+                    if !d.is_empty() {
+                        *domain_totals.entry(d).or_insert(0) += duration;
+                    }
+                }
+            } else {
+                // ブラウザ以外はアプリ別に集計
+                *app_totals.entry(process_name).or_insert(0) += duration;
+            }
+        }
+
+        // 閾値以上のものだけフィルタリング
+        let app_summaries: Vec<AppUsageSummary> = app_totals
+            .into_iter()
+            .filter(|(_, total)| *total >= min_duration)
+            .map(|(process_name, total_seconds)| AppUsageSummary {
+                process_name,
+                total_seconds,
+            })
             .collect();
 
-        records
+        let domain_summaries: Vec<DomainUsageSummary> = domain_totals
+            .into_iter()
+            .filter(|(_, total)| *total >= min_duration)
+            .map(|(domain, total_seconds)| DomainUsageSummary {
+                domain,
+                total_seconds,
+            })
+            .collect();
+
+        (app_summaries, domain_summaries)
     };
 
-    if activities.is_empty() {
+    if app_summaries.is_empty() && domain_summaries.is_empty() {
         return Ok(UploadResult {
             success: true,
-            message: "No activities to upload".to_string(),
-            uploaded_count: 0,
+            message: format!(
+                "No data to upload (no apps/domains used for {}+ seconds)",
+                min_duration
+            ),
+            app_count: 0,
+            domain_count: 0,
         });
     }
 
-    let activity_count = activities.len();
+    let app_count = app_summaries.len();
+    let domain_count = domain_summaries.len();
 
     // アップロードリクエストを作成
     let request = UploadRequest {
         user_id,
         machine_name,
-        activities,
+        date: date.clone(),
+        min_duration_seconds: upload_config.min_duration_seconds,
+        app_summaries,
+        domain_summaries,
     };
 
     // HTTPクライアントでアップロード
@@ -883,8 +965,12 @@ async fn upload_activities(
     if response.status().is_success() {
         Ok(UploadResult {
             success: true,
-            message: format!("Successfully uploaded {} activities", activity_count),
-            uploaded_count: activity_count,
+            message: format!(
+                "Uploaded {} apps, {} domains (min {}s)",
+                app_count, domain_count, min_duration
+            ),
+            app_count,
+            domain_count,
         })
     } else {
         let status = response.status();
