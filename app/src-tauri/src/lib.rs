@@ -764,13 +764,9 @@ pub struct UploadConfigInfo {
 pub struct AppUsageSummary {
     pub process_name: String,
     pub total_seconds: i64,
-}
-
-/// ドメイン使用時間サマリー（アップロード用）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainUsageSummary {
-    pub domain: String,
-    pub total_seconds: i64,
+    /// ブラウザの場合のドメイン（ブラウザ以外はnull）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 /// アップロードリクエスト（集計データ形式）
@@ -781,7 +777,6 @@ struct UploadRequest {
     date: String,
     min_duration_seconds: u32,
     app_summaries: Vec<AppUsageSummary>,
-    domain_summaries: Vec<DomainUsageSummary>,
 }
 
 /// アップロード結果
@@ -789,8 +784,7 @@ struct UploadRequest {
 pub struct UploadResult {
     pub success: bool,
     pub message: String,
-    pub app_count: usize,
-    pub domain_count: usize,
+    pub uploaded_count: usize,
 }
 
 /// 現在のユーザー情報を取得
@@ -861,15 +855,15 @@ async fn upload_activities(
     let machine_name = get_machine_name();
 
     // 指定日のアクティビティを取得して集計
-    let (app_summaries, domain_summaries) = {
+    let app_summaries = {
         let db = state.db.lock();
         let start_of_day = format!("{}T00:00:00", date);
         let end_of_day = format!("{}T23:59:59", date);
 
-        // アプリ別集計（ブラウザ以外）
-        let mut app_totals: HashMap<String, i64> = HashMap::new();
-        // ドメイン別集計（ブラウザのドメイン）
-        let mut domain_totals: HashMap<String, i64> = HashMap::new();
+        // (process_name, domain) をキーにして集計
+        // ブラウザ以外: (process_name, None)
+        // ブラウザ: (process_name, Some(domain))
+        let mut totals: HashMap<(String, Option<String>), i64> = HashMap::new();
 
         let mut stmt = db
             .prepare(
@@ -892,55 +886,48 @@ async fn upload_activities(
         for row in rows.flatten() {
             let (process_name, domain, duration) = row;
 
-            if is_browser_process(&process_name) {
-                // ブラウザの場合はドメイン別に集計
-                if let Some(d) = domain {
-                    if !d.is_empty() {
-                        *domain_totals.entry(d).or_insert(0) += duration;
-                    }
+            let key = if is_browser_process(&process_name) {
+                // ブラウザの場合は (process_name, domain) で集計
+                let d = domain.filter(|s| !s.is_empty());
+                if d.is_some() {
+                    (process_name, d)
+                } else {
+                    continue; // ドメインがない場合はスキップ
                 }
             } else {
-                // ブラウザ以外はアプリ別に集計
-                *app_totals.entry(process_name).or_insert(0) += duration;
-            }
+                // ブラウザ以外は (process_name, None) で集計
+                (process_name, None)
+            };
+
+            *totals.entry(key).or_insert(0) += duration;
         }
 
         // 閾値以上のものだけフィルタリング
-        let app_summaries: Vec<AppUsageSummary> = app_totals
+        let app_summaries: Vec<AppUsageSummary> = totals
             .into_iter()
             .filter(|(_, total)| *total >= min_duration)
-            .map(|(process_name, total_seconds)| AppUsageSummary {
+            .map(|((process_name, domain), total_seconds)| AppUsageSummary {
                 process_name,
                 total_seconds,
-            })
-            .collect();
-
-        let domain_summaries: Vec<DomainUsageSummary> = domain_totals
-            .into_iter()
-            .filter(|(_, total)| *total >= min_duration)
-            .map(|(domain, total_seconds)| DomainUsageSummary {
                 domain,
-                total_seconds,
             })
             .collect();
 
-        (app_summaries, domain_summaries)
+        app_summaries
     };
 
-    if app_summaries.is_empty() && domain_summaries.is_empty() {
+    if app_summaries.is_empty() {
         return Ok(UploadResult {
             success: true,
             message: format!(
                 "No data to upload (no apps/domains used for {}+ seconds)",
                 min_duration
             ),
-            app_count: 0,
-            domain_count: 0,
+            uploaded_count: 0,
         });
     }
 
-    let app_count = app_summaries.len();
-    let domain_count = domain_summaries.len();
+    let uploaded_count = app_summaries.len();
 
     // アップロードリクエストを作成
     let request = UploadRequest {
@@ -949,7 +936,6 @@ async fn upload_activities(
         date: date.clone(),
         min_duration_seconds: upload_config.min_duration_seconds,
         app_summaries,
-        domain_summaries,
     };
 
     // HTTPクライアントでアップロード
@@ -966,11 +952,10 @@ async fn upload_activities(
         Ok(UploadResult {
             success: true,
             message: format!(
-                "Uploaded {} apps, {} domains (min {}s)",
-                app_count, domain_count, min_duration
+                "Uploaded {} records (min {}s)",
+                uploaded_count, min_duration
             ),
-            app_count,
-            domain_count,
+            uploaded_count,
         })
     } else {
         let status = response.status();

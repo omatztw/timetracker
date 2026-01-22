@@ -32,10 +32,10 @@
 
 デスクトップアプリは以下のルールでデータを集計・フィルタリングしてからアップロードします：
 
-| カテゴリ | フィルタリングルール |
-|---------|---------------------|
-| **ブラウザ以外のアプリ** | アプリ別に合計使用時間を集計し、閾値（デフォルト10分）以上のもののみ |
-| **ブラウザ** | ドメイン別に合計閲覧時間を集計し、閾値（デフォルト10分）以上のもののみ |
+| カテゴリ | 集計キー | フィルタリング |
+|---------|---------|---------------|
+| **ブラウザ以外のアプリ** | `process_name` | 閾値（デフォルト10分）以上 |
+| **ブラウザ** | `process_name` + `domain` | 閾値（デフォルト10分）以上 |
 
 **ブラウザとして認識されるプロセス:**
 - chrome.exe, msedge.exe, firefox.exe, brave.exe, opera.exe, vivaldi.exe, iexplore.exe
@@ -70,16 +70,16 @@ Content-Type: application/json
     {
       "process_name": "slack.exe",
       "total_seconds": 3600
-    }
-  ],
-  "domain_summaries": [
-    {
-      "domain": "github.com",
-      "total_seconds": 1800
     },
     {
-      "domain": "stackoverflow.com",
-      "total_seconds": 900
+      "process_name": "chrome.exe",
+      "total_seconds": 1800,
+      "domain": "github.com"
+    },
+    {
+      "process_name": "chrome.exe",
+      "total_seconds": 900,
+      "domain": "stackoverflow.com"
     }
   ]
 }
@@ -93,22 +93,15 @@ Content-Type: application/json
 | `machine_name` | string | No | マシン名（`COMPUTERNAME` 環境変数） |
 | `date` | string | Yes | 対象日（`YYYY-MM-DD`形式） |
 | `min_duration_seconds` | integer | Yes | フィルタリングに使用した閾値（秒） |
-| `app_summaries` | array | Yes | アプリ使用時間サマリー（ブラウザ以外） |
-| `domain_summaries` | array | Yes | ドメイン閲覧時間サマリー（ブラウザ） |
+| `app_summaries` | array | Yes | アプリ/ドメイン使用時間サマリー |
 
 #### App Summary Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `process_name` | string | プロセス名（例: `Code.exe`, `slack.exe`） |
-| `total_seconds` | integer | その日の合計使用時間（秒） |
-
-#### Domain Summary Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `domain` | string | ドメイン名（例: `github.com`） |
-| `total_seconds` | integer | その日の合計閲覧時間（秒） |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `process_name` | string | Yes | プロセス名（例: `Code.exe`, `chrome.exe`） |
+| `total_seconds` | integer | Yes | その日の合計使用時間（秒） |
+| `domain` | string | No | ブラウザの場合のドメイン（ブラウザ以外は省略） |
 
 #### Response
 
@@ -116,7 +109,7 @@ Content-Type: application/json
 ```json
 {
   "success": true,
-  "message": "Received 3 apps, 2 domains for user@domain.com on 2024-01-15"
+  "message": "Received 4 records for user@domain.com on 2024-01-15"
 }
 ```
 
@@ -155,37 +148,27 @@ CREATE TABLE users (
     last_upload_at TIMESTAMP
 );
 
--- アプリ使用時間テーブル
+-- アプリ/ドメイン使用時間テーブル（統合）
 CREATE TABLE app_usage (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(255) NOT NULL,
     machine_name VARCHAR(255),
     date DATE NOT NULL,
     process_name VARCHAR(255) NOT NULL,
+    domain VARCHAR(255),              -- ブラウザの場合のドメイン（NULLの場合は非ブラウザ）
     total_seconds INTEGER NOT NULL,
     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(user_id),
-    CONSTRAINT unique_app_usage UNIQUE (user_id, machine_name, date, process_name)
+    CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 
--- ドメイン閲覧時間テーブル
-CREATE TABLE domain_usage (
-    id SERIAL PRIMARY KEY,
-    user_id VARCHAR(255) NOT NULL,
-    machine_name VARCHAR(255),
-    date DATE NOT NULL,
-    domain VARCHAR(255) NOT NULL,
-    total_seconds INTEGER NOT NULL,
-    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+-- ユニーク制約（同じuser/machine/date/process/domainの組み合わせは1レコード）
+CREATE UNIQUE INDEX idx_app_usage_unique
+ON app_usage(user_id, machine_name, date, process_name, COALESCE(domain, ''));
 
-    CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(user_id),
-    CONSTRAINT unique_domain_usage UNIQUE (user_id, machine_name, date, domain)
-);
-
--- インデックス
+-- 検索用インデックス
 CREATE INDEX idx_app_usage_user_date ON app_usage(user_id, date);
-CREATE INDEX idx_domain_usage_user_date ON domain_usage(user_id, date);
+CREATE INDEX idx_app_usage_domain ON app_usage(domain) WHERE domain IS NOT NULL;
 ```
 
 ---
@@ -198,17 +181,13 @@ CREATE INDEX idx_domain_usage_user_date ON domain_usage(user_id, date);
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import date
 
 app = FastAPI()
 
 class AppSummary(BaseModel):
     process_name: str
     total_seconds: int
-
-class DomainSummary(BaseModel):
-    domain: str
-    total_seconds: int
+    domain: Optional[str] = None
 
 class UploadRequest(BaseModel):
     user_id: str
@@ -216,7 +195,6 @@ class UploadRequest(BaseModel):
     date: str
     min_duration_seconds: int
     app_summaries: List[AppSummary]
-    domain_summaries: List[DomainSummary]
 
 class UploadResponse(BaseModel):
     success: bool
@@ -227,22 +205,28 @@ async def upload_activities(request: UploadRequest):
     if not request.user_id:
         raise HTTPException(status_code=400, detail="Invalid user_id")
 
-    app_count = len(request.app_summaries)
-    domain_count = len(request.domain_summaries)
+    count = len(request.app_summaries)
 
-    if app_count == 0 and domain_count == 0:
+    if count == 0:
         return UploadResponse(
             success=True,
             message="No data to store"
         )
 
     # TODO: データベースに保存（UPSERT）
-    # await upsert_app_usage(request.user_id, request.machine_name, request.date, request.app_summaries)
-    # await upsert_domain_usage(request.user_id, request.machine_name, request.date, request.domain_summaries)
+    # for summary in request.app_summaries:
+    #     await upsert_app_usage(
+    #         user_id=request.user_id,
+    #         machine_name=request.machine_name,
+    #         date=request.date,
+    #         process_name=summary.process_name,
+    #         domain=summary.domain,
+    #         total_seconds=summary.total_seconds
+    #     )
 
     return UploadResponse(
         success=True,
-        message=f"Received {app_count} apps, {domain_count} domains for {request.user_id} on {request.date}"
+        message=f"Received {count} records for {request.user_id} on {request.date}"
     )
 ```
 
@@ -255,7 +239,7 @@ const app = express();
 app.use(express.json());
 
 app.post('/api/upload', async (req, res) => {
-  const { user_id, machine_name, date, min_duration_seconds, app_summaries, domain_summaries } = req.body;
+  const { user_id, machine_name, date, min_duration_seconds, app_summaries } = req.body;
 
   if (!user_id) {
     return res.status(400).json({
@@ -265,17 +249,24 @@ app.post('/api/upload', async (req, res) => {
     });
   }
 
-  const appCount = app_summaries?.length || 0;
-  const domainCount = domain_summaries?.length || 0;
+  const count = app_summaries?.length || 0;
 
   try {
     // TODO: データベースに保存（UPSERT）
-    // await upsertAppUsage(user_id, machine_name, date, app_summaries);
-    // await upsertDomainUsage(user_id, machine_name, date, domain_summaries);
+    // for (const summary of app_summaries) {
+    //   await upsertAppUsage({
+    //     user_id,
+    //     machine_name,
+    //     date,
+    //     process_name: summary.process_name,
+    //     domain: summary.domain || null,
+    //     total_seconds: summary.total_seconds
+    //   });
+    // }
 
     res.json({
       success: true,
-      message: `Received ${appCount} apps, ${domainCount} domains for ${user_id} on ${date}`
+      message: `Received ${count} records for ${user_id} on ${date}`
     });
   } catch (error) {
     res.status(500).json({
@@ -334,13 +325,14 @@ min_duration_seconds = 600  # 10分以上使用したアプリ/ドメインの�
 **設定:** `min_duration_seconds = 600`（10分）
 
 **その日の生データ:**
-| アプリ/ドメイン | 合計時間 | アップロード対象 |
-|----------------|---------|-----------------|
-| Code.exe | 2時間 | ✅ |
-| slack.exe | 45分 | ✅ |
-| notepad.exe | 3分 | ❌ (10分未満) |
-| github.com | 30分 | ✅ |
-| google.com | 5分 | ❌ (10分未満) |
+| プロセス名 | ドメイン | 合計時間 | アップロード対象 |
+|-----------|---------|---------|-----------------|
+| Code.exe | - | 2時間 | ✅ |
+| slack.exe | - | 45分 | ✅ |
+| notepad.exe | - | 3分 | ❌ (10分未満) |
+| chrome.exe | github.com | 30分 | ✅ |
+| chrome.exe | google.com | 5分 | ❌ (10分未満) |
+| msedge.exe | docs.microsoft.com | 15分 | ✅ |
 
 **アップロードされるJSON:**
 ```json
@@ -351,10 +343,9 @@ min_duration_seconds = 600  # 10分以上使用したアプリ/ドメインの�
   "min_duration_seconds": 600,
   "app_summaries": [
     { "process_name": "Code.exe", "total_seconds": 7200 },
-    { "process_name": "slack.exe", "total_seconds": 2700 }
-  ],
-  "domain_summaries": [
-    { "domain": "github.com", "total_seconds": 1800 }
+    { "process_name": "slack.exe", "total_seconds": 2700 },
+    { "process_name": "chrome.exe", "total_seconds": 1800, "domain": "github.com" },
+    { "process_name": "msedge.exe", "total_seconds": 900, "domain": "docs.microsoft.com" }
   ]
 }
 ```
@@ -374,14 +365,12 @@ curl -X POST http://localhost:3000/api/upload \
     "min_duration_seconds": 600,
     "app_summaries": [
       { "process_name": "Code.exe", "total_seconds": 7200 },
-      { "process_name": "slack.exe", "total_seconds": 2700 }
-    ],
-    "domain_summaries": [
-      { "domain": "github.com", "total_seconds": 1800 }
+      { "process_name": "slack.exe", "total_seconds": 2700 },
+      { "process_name": "chrome.exe", "total_seconds": 1800, "domain": "github.com" }
     ]
   }'
 
-# 空のデータ（閾値以上のアプリ/ドメインがない場合）
+# 空のデータ
 curl -X POST http://localhost:3000/api/upload \
   -H "Content-Type: application/json" \
   -d '{
@@ -389,8 +378,7 @@ curl -X POST http://localhost:3000/api/upload \
     "machine_name": "TEST-PC",
     "date": "2024-01-15",
     "min_duration_seconds": 600,
-    "app_summaries": [],
-    "domain_summaries": []
+    "app_summaries": []
   }'
 ```
 
@@ -412,9 +400,27 @@ slack.exe         ████████              45m
 [ブラウザ閲覧時間]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 github.com        ██████                30m
+docs.microsoft.com ███                   15m
 ```
 
-### 週次/月次レポート
-- 日ごとの合計作業時間
-- よく使うアプリのランキング
-- よく閲覧するドメインのランキング
+### データベースクエリ例
+
+```sql
+-- 非ブラウザアプリのランキング
+SELECT process_name, SUM(total_seconds) as total
+FROM app_usage
+WHERE user_id = 'user@domain.com'
+  AND domain IS NULL
+  AND date BETWEEN '2024-01-01' AND '2024-01-31'
+GROUP BY process_name
+ORDER BY total DESC;
+
+-- ブラウザドメインのランキング
+SELECT domain, SUM(total_seconds) as total
+FROM app_usage
+WHERE user_id = 'user@domain.com'
+  AND domain IS NOT NULL
+  AND date BETWEEN '2024-01-01' AND '2024-01-31'
+GROUP BY domain
+ORDER BY total DESC;
+```

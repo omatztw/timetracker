@@ -44,8 +44,7 @@ interface UploadConfigInfo {
 interface UploadResult {
   success: boolean;
   message: string;
-  app_count: number;
-  domain_count: number;
+  uploaded_count: number;
 }
 
 // Store detected ticket IDs for each activity
@@ -498,7 +497,7 @@ async function uploadActivities(): Promise<void> {
 
     if (result.success) {
       statusEl.textContent = result.message;
-      if (result.app_count > 0 || result.domain_count > 0) {
+      if (result.uploaded_count > 0) {
         uploadBtn.textContent = `Uploaded!`;
       } else {
         uploadBtn.textContent = "No data";
